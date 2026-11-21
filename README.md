@@ -151,7 +151,3 @@ Open `notebooks/DIT5411_Chinese_Recognition_Colab.ipynb` and run the cells to tr
 - Full 13,065-character dataset: https://github.com/chenkenanalytic/handwritting_data_all
 - OpenCV augmentation tutorial: https://github.com/darshitajain/Introduction-to-OpenCV
 - Handwritten Digit Recognition with Keras and TensorFlow: https://github.com/kimanalytics/Handwritten-Digit-Recognition-using-Keras-and-TensorFlow
-
-## Author
-
-YOUR_NAME — DIT5411 Machine Learning Assignment
