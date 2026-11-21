@@ -8,8 +8,10 @@ import os
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-# Base directory of the project
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Base directory of the project. On Google Colab you can set the
+# DIT5411_PROJECT_ROOT environment variable so that data/models/results are
+# stored on Google Drive and survive runtime disconnections.
+BASE_DIR = os.environ.get("DIT5411_PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
 
 # Where the raw images are stored. The full dataset unzips to a 'cleaned_data'
 # folder with subdirectories named by Chinese characters.

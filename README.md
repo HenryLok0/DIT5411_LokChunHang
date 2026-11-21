@@ -86,6 +86,16 @@ Available models:
 | `b`   | Medium CNN (16 → 32 filters, 64 dense units) |
 | `c`   | Small CNN (8 filters, 16 dense units) |
 
+#### Resume training
+
+If training is interrupted (e.g. computer shut down or Colab disconnects), run the same command with `--resume`:
+
+```bash
+python train.py --model a --epochs 5 --batch-size 1024 --resume
+```
+
+The script loads `models/best_model_<model>.keras` and continues from the last completed epoch.
+
 ### 4. Evaluate
 
 Evaluate a single model:
@@ -132,6 +142,8 @@ You can update this section with your own numbers after running the experiments.
 ## Google Colab
 
 Open `notebooks/DIT5411_Chinese_Recognition_Colab.ipynb` and run the cells to train on Google Colab with a GPU.
+
+> **Important:** The notebook stores the project under `Google Drive/MyDrive/DIT5411` by setting the `DIT5411_PROJECT_ROOT` environment variable. This keeps data, models and results even if the Colab runtime disconnects. Model A also uses `--resume` automatically when a checkpoint exists, so you can reconnect and continue training.
 
 ## References
 
