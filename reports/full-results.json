@@ -1,0 +1,83 @@
+{
+  "scope": "full",
+  "archive_sha256": "74607b8d642a4dfd640586efd221cd935bdf16c93c83f2eb9e5092befde60420",
+  "stats": {
+    "classes": 13065,
+    "original_images": 684677,
+    "minimum_originals_per_class": 16,
+    "maximum_originals_per_class": 61,
+    "classes_below_40": 43,
+    "classes_with_test_samples": 13022,
+    "train_originals": 522127,
+    "test_originals": 162550,
+    "augmented_training_images_per_epoch": 2613000,
+    "originals_per_class_histogram": {
+      "16": 1,
+      "17": 1,
+      "18": 2,
+      "20": 4,
+      "21": 1,
+      "22": 2,
+      "23": 3,
+      "27": 1,
+      "31": 2,
+      "32": 9,
+      "33": 2,
+      "34": 8,
+      "35": 4,
+      "36": 2,
+      "37": 1,
+      "47": 1,
+      "48": 5,
+      "49": 1915,
+      "50": 2742,
+      "51": 4426,
+      "52": 600,
+      "53": 106,
+      "56": 2,
+      "57": 122,
+      "58": 1079,
+      "59": 1429,
+      "60": 590,
+      "61": 5
+    }
+  },
+  "training": {
+    "version": 1,
+    "dataset": "a0ef6cf8041719c813234d9886a3894d29d8090e6b1732a38f00fe6af1d33861",
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "precision": "float32",
+    "seed": 42,
+    "epochs": 3
+  },
+  "evaluation_batch_size": 256,
+  "results": [
+    {
+      "model": "a",
+      "parameters": 4630953,
+      "accuracy": 6.151953130029142e-05,
+      "loss": 9.477985382080078,
+      "top5_accuracy": 0.00035681328154169023
+    },
+    {
+      "model": "b",
+      "parameters": 1917569,
+      "accuracy": 6.151953130029142e-05,
+      "loss": 9.477982521057129,
+      "top5_accuracy": 0.00035681328154169023
+    },
+    {
+      "model": "c",
+      "parameters": 886361,
+      "accuracy": 6.151953130029142e-05,
+      "loss": 9.477983474731445,
+      "top5_accuracy": 0.00035681328154169023
+    }
+  ],
+  "highest_top1_models": [
+    "a",
+    "b",
+    "c"
+  ]
+}
