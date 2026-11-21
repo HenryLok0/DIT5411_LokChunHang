@@ -4,9 +4,14 @@ Train a CNN model on the prepared dataset.
 Usage examples:
     python train.py --model a --epochs 5
     python train.py --model b --batch-size 512 --augment-dir data/augmented
+    python train.py --model a --epochs 5 --resume
+
+If --resume is set, the script will load the latest checkpoint and continue training
+from the last saved epoch. This is useful when Colab disconnects or when you want
+to split training across multiple days.
 
 If --augment-dir is provided, training images are loaded from that folder.
-Otherwise augmentation is applied on-the-fly using tf.image operations.
+Otherwise augmentation is applied on-the-fly using the model's preprocessing layers.
 """
 
 import argparse
@@ -27,7 +32,7 @@ from utils import (
 )
 
 
-def create_dataset(data_dir: str, augment: bool = True):
+def create_dataset(data_dir: str):
     """
     Build a tf.data.Dataset from a directory of class folders.
     Each folder name becomes the integer label.
@@ -55,12 +60,30 @@ def create_dataset(data_dir: str, augment: bool = True):
     return ds, len(classes)
 
 
+def _load_history(model_name: str) -> dict:
+    """Load previous training history if it exists."""
+    history_path = os.path.join(config.RESULTS_DIR, f"history_{model_name}.json")
+    if not os.path.exists(history_path):
+        return {}
+    with open(history_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _merge_histories(old: dict, new: dict) -> dict:
+    """Append new history values to old ones for continuity."""
+    merged = {}
+    for key in set(old) | set(new):
+        merged[key] = old.get(key, []) + new.get(key, [])
+    return merged
+
+
 def train(
     model_name: str,
     epochs: int = config.EPOCHS,
     batch_size: int = config.BATCH_SIZE,
     learning_rate: float = config.LEARNING_RATE,
     augment_dir: str = None,
+    resume: bool = False,
 ):
     """Train one model and save the best checkpoint plus training history."""
     set_seeds(config.SEED)
@@ -71,23 +94,38 @@ def train(
         raise FileNotFoundError(f"Training directory not found: {train_dir}")
 
     # Build datasets
-    train_ds, num_classes = create_dataset(train_dir, augment=(augment_dir is None))
-    test_ds, _ = create_dataset(config.TEST_DIR, augment=False)
+    train_ds, num_classes = create_dataset(train_dir)
+    test_ds, _ = create_dataset(config.TEST_DIR)
 
     print(f"Training on {num_classes} classes")
     print(f"Train batches: {len(list(train_ds))}, Test batches: {len(list(test_ds))}")
 
-    # Recompile with the actual number of classes seen in the data
-    config.NUM_CLASSES = num_classes
-
-    model = get_model(model_name)
-    model = compile_model(model, learning_rate=learning_rate)
-    model.summary()
-
-    # Callbacks
+    # Paths
     checkpoint_path = os.path.join(
         config.MODELS_DIR, f"best_model_{model_name}.keras"
     )
+    final_path = os.path.join(config.MODELS_DIR, f"final_model_{model_name}.keras")
+    history_path = os.path.join(config.RESULTS_DIR, f"history_{model_name}.json")
+
+    # Resume logic
+    old_history = _load_history(model_name)
+    initial_epoch = 0
+    if resume and os.path.exists(checkpoint_path):
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        model = keras.models.load_model(checkpoint_path)
+        initial_epoch = len(old_history.get("loss", []))
+        print(f"Continuing from epoch {initial_epoch} up to epoch {epochs}")
+    else:
+        if resume:
+            print(f"No checkpoint found at {checkpoint_path}; starting from scratch.")
+        # Recompile with the actual number of classes seen in the data
+        config.NUM_CLASSES = num_classes
+        model = get_model(model_name)
+        model = compile_model(model, learning_rate=learning_rate)
+
+    model.summary()
+
+    # Callbacks
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             checkpoint_path,
@@ -111,17 +149,17 @@ def train(
     history = model.fit(
         train_ds,
         epochs=epochs,
+        initial_epoch=initial_epoch,
         validation_data=test_ds,
         callbacks=callbacks,
     )
 
-    # Save final model and history
-    final_path = os.path.join(config.MODELS_DIR, f"final_model_{model_name}.keras")
+    # Save final model and merged history
     model.save(final_path)
 
-    history_path = os.path.join(config.RESULTS_DIR, f"history_{model_name}.json")
+    merged_history = _merge_histories(old_history, history.history)
     with open(history_path, "w", encoding="utf-8") as f:
-        json.dump(history.history, f, indent=2)
+        json.dump(merged_history, f, indent=2)
 
     print(f"Training complete. Best model saved to {checkpoint_path}")
     print(f"Final model saved to {final_path}")
@@ -140,7 +178,7 @@ if __name__ == "__main__":
         "--epochs",
         type=int,
         default=config.EPOCHS,
-        help="Number of training epochs",
+        help="Total number of training epochs (including already completed ones)",
     )
     parser.add_argument(
         "--batch-size",
@@ -152,13 +190,18 @@ if __name__ == "__main__":
         "--learning-rate",
         type=float,
         default=config.LEARNING_RATE,
-        help="Initial learning rate for Adam",
+        help="Initial learning rate for Adam (ignored when resuming)",
     )
     parser.add_argument(
         "--augment-dir",
         type=str,
         default=None,
         help="Use pre-generated augmented images instead of on-the-fly augmentation",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from the best checkpoint if it exists",
     )
     args = parser.parse_args()
 
@@ -168,4 +211,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         augment_dir=args.augment_dir,
+        resume=args.resume,
     )
