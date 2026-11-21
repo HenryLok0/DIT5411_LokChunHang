@@ -55,7 +55,7 @@ To try a completed model on a single-character image, run `python predict.py cha
 
 ### Results
 
-**Full-dataset accuracy and the winning architecture are pending the full experiment.** After all three runs finish, the evaluation command writes `reports/full-results.md` and `runs/full/model_comparison.json`. It rejects unfinished or mismatched runs. Link the generated full results in this README before submitting.
+Highest observed full-dataset top-1: **Model A, B, C (0.01%)**. See the [full test results](reports/full-results.md) for the scores of all three models.
 
 The [GitHub Actions experiment](../../actions/workflows/full-experiment.yml) runs the three architectures independently on standard CPU runners with the same three-epoch budget and batch size of 256. It publishes the comparison only after all three full-dataset evaluations pass validation.
 
