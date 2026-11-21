@@ -1,49 +1,132 @@
-"""Three CNN classifiers with the same data and optimizer."""
+"""
+CNN model architectures for Traditional Chinese handwritten character recognition.
+
+Each model accepts grayscale images of size IMG_SIZE x IMG_SIZE and outputs
+NUM_CLASSES logits (one per character). The assignment asks for multiple
+architectures so you can compare them.
+"""
 
 from tensorflow import keras
-from tensorflow.keras import layers as L
+from tensorflow.keras import layers
 
-from augment import augment_batch
 import config
 
 
-ARCHITECTURES = {
-    "a": ((32, 64, 128), 256, 0.30),
-    "b": ((24, 48), 128, 0.25),
-    "c": ((16,), 64, 0.20),
+def _input_block():
+    """Common input layer."""
+    return keras.Input(shape=(config.IMG_SIZE, config.IMG_SIZE, config.IMG_CHANNELS))
+
+
+def _augmentation_block(x):
+    """
+    Mild on-the-fly augmentation applied only during training.
+    After inversion, background is near 0, so fill_value=0.0.
+    """
+    x = layers.RandomRotation(factor=0.05, fill_mode="constant", fill_value=0.0)(x)
+    x = layers.RandomTranslation(
+        height_factor=0.05, width_factor=0.05, fill_mode="constant", fill_value=0.0
+    )(x)
+    return x
+
+
+def _conv_block(x, filters: int, kernel_size: int = 3, pool: bool = True):
+    """A convolutional block: Conv -> BatchNorm -> ReLU -> (MaxPool)."""
+    x = layers.Conv2D(filters, kernel_size, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    if pool:
+        x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+    return x
+
+
+def _head(x, dense_units: int, dropout_rate: float):
+    """Flatten + Dense classifier head. Keeps spatial structure (important for CJK)."""
+    x = layers.Flatten()(x)
+    x = layers.Dense(dense_units, use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    x = layers.Dropout(dropout_rate)(x)
+    outputs = layers.Dense(
+        config.NUM_CLASSES, activation="softmax", dtype="float32", name="predictions"
+    )(x)
+    return outputs
+
+
+def build_model_a(
+    dense_units: int = 256,
+    dropout_rate: float = config.DROPOUT_RATE,
+) -> keras.Model:
+    """
+    Deep CNN.
+    Filters: 32 -> 64 -> 128, Dense: 256.
+    """
+    inputs = _input_block()
+    x = _augmentation_block(inputs)
+    x = _conv_block(x, 32)
+    x = _conv_block(x, 64)
+    x = _conv_block(x, 128, pool=False)
+    outputs = _head(x, dense_units=dense_units, dropout_rate=dropout_rate)
+    return keras.Model(inputs, outputs, name="model_a")
+
+
+def build_model_b(
+    dense_units: int = 128,
+    dropout_rate: float = config.DROPOUT_RATE,
+) -> keras.Model:
+    """
+    Medium CNN.
+    Filters: 32 -> 64 -> 64, Dense: 128.
+    """
+    inputs = _input_block()
+    x = _augmentation_block(inputs)
+    x = _conv_block(x, 32)
+    x = _conv_block(x, 64)
+    x = _conv_block(x, 64, pool=False)
+    outputs = _head(x, dense_units=dense_units, dropout_rate=dropout_rate)
+    return keras.Model(inputs, outputs, name="model_b")
+
+
+def build_model_c(
+    dense_units: int = 64,
+    dropout_rate: float = config.DROPOUT_RATE,
+) -> keras.Model:
+    """
+    Small CNN.
+    Filters: 16 -> 32 -> 32, Dense: 64.
+    """
+    inputs = _input_block()
+    x = _augmentation_block(inputs)
+    x = _conv_block(x, 16)
+    x = _conv_block(x, 32)
+    x = _conv_block(x, 32, pool=False)
+    outputs = _head(x, dense_units=dense_units, dropout_rate=dropout_rate)
+    return keras.Model(inputs, outputs, name="model_c")
+
+
+MODEL_BUILDERS = {
+    "a": build_model_a,
+    "b": build_model_b,
+    "c": build_model_c,
 }
 
 
-def get_model(name, num_classes=config.NUM_CLASSES):
-    filters, dense, dropout = ARCHITECTURES[name]
-    image = keras.Input((config.IMG_SIZE, config.IMG_SIZE, 1), name="grayscale")
-    x = augment_batch(image)
-    x = L.AveragePooling2D(2)(x)
-    for i, width in enumerate(filters):
-        x = L.Conv2D(width, 3, padding="same", use_bias=False)(x)
-        # Faster moving statistics reduce the train/inference gap in short runs.
-        x = L.BatchNormalization(momentum=0.9)(x)
-        x = L.LeakyReLU(negative_slope=0.1)(x)
-        if i < 2:
-            x = L.MaxPooling2D(2)(x)
-    if name == "c":
-        x = L.AveragePooling2D(2)(x)
-    # Keep the 6×6 spatial layout: stroke positions matter for distinguishing glyphs.
-    x = L.Flatten()(x)
-    x = L.Dense(dense, activation="relu")(x)
-    x = L.Dropout(dropout)(x)
-    y = L.Dense(num_classes, activation="softmax", dtype="float32", name="character")(x)
-    return keras.Model(image, y, name=f"model_{name}")
+def get_model(name: str, **kwargs) -> keras.Model:
+    """Return a compiled or uncompiled model by name."""
+    name = name.lower()
+    if name not in MODEL_BUILDERS:
+        raise ValueError(f"Unknown model '{name}'. Choose from {list(MODEL_BUILDERS)}")
+    return MODEL_BUILDERS[name](**kwargs)
 
 
-def compile_model(model, learning_rate):
+def compile_model(model: keras.Model, learning_rate: float = config.LEARNING_RATE):
+    """Compile the model with Adam and sparse categorical crossentropy."""
+    optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate),
-        loss=keras.losses.SparseCategoricalCrossentropy(),
+        optimizer=optimizer,
+        loss="sparse_categorical_crossentropy",
         metrics=[
-            keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+            "accuracy",
             keras.metrics.SparseTopKCategoricalAccuracy(k=5, name="top5_accuracy"),
         ],
-        jit_compile=False,
     )
     return model
