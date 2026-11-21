@@ -57,6 +57,8 @@ To try a completed model on a single-character image, run `python predict.py cha
 
 **Full-dataset accuracy and the winning architecture are pending the full experiment.** After all three runs finish, the evaluation command writes `reports/full-results.md` and `runs/full/model_comparison.json`. It rejects unfinished or mismatched runs. Link the generated full results in this README before submitting.
 
+The [GitHub Actions experiment](../../actions/workflows/full-experiment.yml) runs the three architectures independently on standard CPU runners with the same three-epoch budget and batch size of 256. It publishes the comparison only after all three full-dataset evaluations pass validation.
+
 The [32-class CPU smoke test](reports/smoke-results.md) checks the pipeline on real handwriting images. Its scores must not be reported as assignment results. The exact ZIP index counts are recorded in the [dataset audit](reports/dataset-audit.json).
 
 To reproduce the smoke test without mixing it with full-run artifacts:

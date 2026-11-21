@@ -12,6 +12,12 @@ from models import compile_model, get_model
 from utils import InputData, prepared, read_json, save_json
 
 
+class Progress(keras.callbacks.Callback):
+    def on_train_batch_end(self, batch, logs=None):
+        if (batch + 1) % 1000 == 0:
+            print(f"Training batch {batch + 1:,}/{self.params['steps']:,}", flush=True)
+
+
 def train(args):
     if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
         raise ValueError("Epochs, batch size and learning rate must all be positive.")
@@ -45,9 +51,11 @@ def train(args):
 
     data = InputData(cache, meta, "train")
     print(f"Training on {len(meta['labels']):,} labels: {len(data.indices):,} draws per epoch.")
+    callbacks = [Progress()] if os.environ.get("GITHUB_ACTIONS") == "true" else []
     for epoch in range(len(state["history"]), args.epochs):
+        print(f"Training epoch {epoch + 1}/{args.epochs}", flush=True)
         history = model.fit(data.dataset(args.batch_size, epoch), initial_epoch=epoch,
-                            epochs=epoch + 1, shuffle=False, verbose=2).history
+                            epochs=epoch + 1, shuffle=False, verbose=2, callbacks=callbacks).history
         values = {k: float(v[-1]) for k, v in history.items()}
         if not all(math.isfinite(value) for value in values.values()):
             raise ValueError("Non-finite training metric; the last valid checkpoint was left intact.")

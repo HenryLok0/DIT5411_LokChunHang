@@ -23,12 +23,12 @@ def read_completed_run(run_dir, name, fingerprint):
     return state, folder / state["checkpoint"]
 
 
-def compare(smoke, batch_size, report_path=None):
+def measure(smoke, batch_size, names):
     if batch_size < 1:
         raise ValueError("Batch size must be positive.")
     cache, meta, fingerprint = prepared(smoke)
     run_dir = config.RUN_ROOT / config.scope(smoke)
-    runs = [(name, *read_completed_run(run_dir, name, fingerprint)) for name in config.MODELS]
+    runs = [(name, *read_completed_run(run_dir, name, fingerprint)) for name in names]
     protocol = runs[0][1]["protocol"]
     if any(state["protocol"] != protocol for _, state, _ in runs):
         raise ValueError("The models must share the same data, epoch budget and training settings.")
@@ -47,18 +47,28 @@ def compare(smoke, batch_size, report_path=None):
         results.append({"model": name, "parameters": model.count_params(), **scores})
         del model
         keras.backend.clear_session()
-    highest = max(row["accuracy"] for row in results)
-    best = [row["model"] for row in results if row["accuracy"] == highest]
-    payload = {
+    return {
         "scope": config.scope(smoke), "archive_sha256": meta["archive_sha256"],
         "stats": meta["stats"], "training": protocol, "evaluation_batch_size": batch_size,
-        "results": results, "highest_top1_models": best,
+        "results": results,
     }
+
+
+def rank(payload):
+    results = payload["results"]
+    highest = max(row["accuracy"] for row in results)
+    payload["highest_top1_models"] = [row["model"] for row in results if row["accuracy"] == highest]
+    return payload
+
+
+def compare(smoke, batch_size, report_path=None):
+    payload = rank(measure(smoke, batch_size, config.MODELS))
+    run_dir = config.RUN_ROOT / config.scope(smoke)
     save_json(run_dir / "model_comparison.json", payload)
     report = report_path or run_dir / "results.md"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(format_report(payload), encoding="utf-8")
-    print(json.dumps(results, indent=2))
+    print(json.dumps(payload["results"], indent=2))
     print(f"Comparison report: {report}")
 
 
@@ -101,5 +111,15 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--model", choices=config.MODELS, help="Evaluate just one checkpoint")
+    parser.add_argument("--metrics", type=Path, help="Write single-model metrics JSON")
     args = parser.parse_args()
-    compare(args.smoke, args.batch_size, args.report)
+    if args.model:
+        if not args.metrics or args.report:
+            parser.error("Single-model evaluation requires --metrics and does not take --report.")
+        args.metrics.parent.mkdir(parents=True, exist_ok=True)
+        save_json(args.metrics, measure(args.smoke, args.batch_size, (args.model,)))
+    elif args.metrics:
+        parser.error("--metrics requires --model.")
+    else:
+        compare(args.smoke, args.batch_size, args.report)
