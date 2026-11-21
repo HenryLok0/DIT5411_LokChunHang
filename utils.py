@@ -1,102 +1,73 @@
-"""
-Utility helpers used across the project.
-TensorFlow is imported lazily so that scripts which do not need it
-(prepare_data.py, augment.py) can still run before TensorFlow is installed.
-"""
+"""Shared data pipeline. The test array is never opened by train.py."""
 
+import hashlib
+import json
 import os
-import random
 
 import numpy as np
+import tensorflow as tf
 
 import config
 
 
-def _import_tf():
-    """Lazy import of tensorflow."""
-    import tensorflow as tf
-
-    return tf
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def set_seeds(seed: int = config.SEED) -> None:
-    """Fix random seeds for reproducible experiments."""
-    os.environ.setdefault("PYTHONHASHSEED", str(seed))
-    random.seed(seed)
-    np.random.seed(seed)
-    tf = _import_tf()
-    tf.random.set_seed(seed)
+def save_json(path, payload):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
-def discover_classes(data_dir: str) -> list:
-    """
-    Return a sorted list of class folder names under data_dir.
-    Each subfolder should be named after one Chinese character.
-    """
-    if not os.path.isdir(data_dir):
-        return []
-    classes = [
-        name
-        for name in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, name))
-    ]
-    # Sort using Python's default unicode ordering so labels are deterministic.
-    classes.sort()
-    return classes
+def prepared(smoke):
+    cache = config.CACHE_ROOT / config.scope(smoke)
+    path = cache / "metadata.json"
+    meta = read_json(path)
+    expected = config.SMOKE_CLASSES if smoke else config.NUM_CLASSES
+    if (meta["format"], meta["scope"], meta["image_size"], len(meta["labels"])) != (
+        1, config.scope(smoke), config.IMG_SIZE, expected
+    ):
+        raise ValueError(f"Prepared metadata in {path} does not match the requested experiment.")
+    return cache, meta, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_label_map(classes: list) -> dict:
-    """Map class name (Chinese character) to integer index."""
-    return {name: idx for idx, name in enumerate(classes)}
+def training_indices(counts):
+    """Assign exactly 200 augmented draws per class; cycle originals for short classes."""
+    per_class = config.TRAIN_PER_CLASS * config.AUGMENT_FACTOR
+    idx_chunks = []
+    start = 0
+    for count in counts:
+        if not 0 < count <= config.TRAIN_PER_CLASS:
+            raise ValueError(f"Bad original training sample count: {count}")
+        idx_chunks.append(np.arange(per_class, dtype=np.int32) % count + start)
+        start += count
+    return np.concatenate(idx_chunks)
 
 
-def decode_image(file_path: str, label: int, img_size: int = config.IMG_SIZE):
-    """
-    Load a PNG/JPEG image, convert to grayscale, resize and normalize.
-    Used inside a tf.data pipeline.
-    """
-    tf = _import_tf()
-    img = tf.io.read_file(file_path)
-    img = tf.io.decode_png(img, channels=config.IMG_CHANNELS)
-    img = tf.image.convert_image_dtype(img, tf.float32)  # scales to [0, 1]
-    img = tf.image.resize(img, [img_size, img_size])
-    return img, label
+class InputData:
+    def __init__(self, cache, meta, split):
+        counts = np.array([row[f"{split}_count"] for row in meta["labels"]], dtype=np.int32)
+        images = np.load(cache / f"{split}.npy", mmap_mode="r", allow_pickle=False)
+        if images.shape != (int(counts.sum()), config.IMG_SIZE, config.IMG_SIZE, 1):
+            raise ValueError(f"Image cache shape does not match the metadata for {split}.")
+        if not len(images) or images.dtype != np.uint8:
+            raise ValueError(f"Invalid image cache for {split}.")
+        self.split = split
+        self.indices = training_indices(counts) if split == "train" else np.arange(len(images), dtype=np.int32)
+        with tf.device("/CPU:0"):
+            self.images = tf.convert_to_tensor(images)
+            self.labels = tf.convert_to_tensor(np.repeat(np.arange(len(counts), dtype=np.int32), counts))
 
+    def dataset(self, batch_size, epoch=0):
+        indices = self.indices.copy()
+        if self.split == "train":
+            np.random.default_rng(config.SEED + epoch).shuffle(indices)
 
-def random_augment(image):
-    """
-    Optional extra augmentation applied inside a tf.data pipeline.
-    The model itself already contains RandomRotation / RandomZoom layers, so
-    this function is kept only for advanced custom pipelines.
-    """
-    tf = _import_tf()
-    # Small random brightness / contrast jitter
-    image = tf.image.random_brightness(image, max_delta=0.05)
-    image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
-    image = tf.clip_by_value(image, 0.0, 1.0)
-    return image
+        def load(batch):
+            with tf.device("/CPU:0"):
+                img = tf.cast(tf.gather(self.images, batch), tf.float32) / 255.
+                return img, tf.gather(self.labels, batch)
 
-
-def augment_dataset(ds, augment_fn=random_augment):
-    """Apply extra data augmentation to every sample in a tf.data.Dataset."""
-    tf = _import_tf()
-    return ds.map(lambda x, y: (augment_fn(x), y), num_parallel_calls=tf.data.AUTOTUNE)
-
-
-def configure_for_performance(
-    ds,
-    batch_size: int = config.BATCH_SIZE,
-    shuffle: bool = True,
-    cache: bool = True,
-):
-    """
-    Add caching, shuffling, batching and prefetching to a tf.data pipeline.
-    """
-    tf = _import_tf()
-    if cache:
-        ds = ds.cache()
-    if shuffle:
-        ds = ds.shuffle(buffer_size=2000, reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
+        return (tf.data.Dataset.from_tensor_slices(indices).batch(batch_size)
+                .map(load, num_parallel_calls=2).prefetch(2))

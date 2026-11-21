@@ -1,121 +1,105 @@
-"""
-Evaluate a trained model on the test set and compare multiple models.
-
-Usage:
-    python evaluate.py --model a
-    python evaluate.py --compare  # evaluates a, b and c checkpoints
-"""
+"""Measure top-1/top-5 on the untouched holdout and write a Markdown report."""
 
 import argparse
 import json
-import os
+import math
+from pathlib import Path
 
-import numpy as np
-import tensorflow as tf
 from tensorflow import keras
 
 import config
-from models import compile_model, get_model
-from utils import configure_for_performance, decode_image, discover_classes
+from models import compile_model
+from utils import InputData, prepared, read_json, save_json
 
 
-def create_test_dataset(data_dir: str):
-    """Build a tf.data.Dataset for evaluation."""
-    classes = discover_classes(data_dir)
-    label_map = {name: idx for idx, name in enumerate(classes)}
-
-    file_paths = []
-    labels = []
-    for char in classes:
-        char_dir = os.path.join(data_dir, char)
-        for img_name in os.listdir(char_dir):
-            if img_name.lower().endswith((".png", ".jpg", ".jpeg")):
-                file_paths.append(os.path.join(char_dir, img_name))
-                labels.append(label_map[char])
-
-    ds = tf.data.Dataset.from_tensor_slices((np.array(file_paths), np.array(labels, dtype=np.int32)))
-    ds = ds.map(decode_image, num_parallel_calls=tf.data.AUTOTUNE)
-    return ds
+def read_completed_run(run_dir, name, fingerprint):
+    folder = run_dir / name
+    state = read_json(folder / "state.json")
+    protocol = state["protocol"]
+    if protocol["dataset"] != fingerprint:
+        raise ValueError(f"Model {name} was trained on a different dataset cache.")
+    if len(state["history"]) != protocol["epochs"]:
+        raise ValueError(f"Model {name} has not reached its planned epoch budget.")
+    return state, folder / state["checkpoint"]
 
 
-def evaluate_model(model_name: str, batch_size: int = config.BATCH_SIZE):
-    """Load the best checkpoint for a model and evaluate it on the test set."""
-    checkpoint_path = os.path.join(
-        config.MODELS_DIR, f"best_model_{model_name}.keras"
-    )
-    if not os.path.exists(checkpoint_path):
-        print(f"Checkpoint not found: {checkpoint_path}")
-        return None
+def compare(smoke, batch_size, report_path=None):
+    if batch_size < 1:
+        raise ValueError("Batch size must be positive.")
+    cache, meta, fingerprint = prepared(smoke)
+    run_dir = config.RUN_ROOT / config.scope(smoke)
+    runs = [(name, *read_completed_run(run_dir, name, fingerprint)) for name in config.MODELS]
+    protocol = runs[0][1]["protocol"]
+    if any(state["protocol"] != protocol for _, state, _ in runs):
+        raise ValueError("The models must share the same data, epoch budget and training settings.")
+    data = InputData(cache, meta, "test")
+    test = data.dataset(batch_size)
+    results = []
+    for name, _, checkpoint in runs:
+        model = keras.models.load_model(checkpoint, compile=False)
+        if model.output_shape[-1] != len(meta["labels"]):
+            raise ValueError(f"Model {name} has the wrong number of output classes.")
+        # Evaluation only needs the weights; do not restore the optimizer state.
+        compile_model(model, protocol["learning_rate"])
+        scores = {k: float(v) for k, v in model.evaluate(test, return_dict=True, verbose=2).items()}
+        if not all(math.isfinite(value) for value in scores.values()):
+            raise ValueError(f"Non-finite evaluation metric for model {name}.")
+        results.append({"model": name, "parameters": model.count_params(), **scores})
+        del model
+        keras.backend.clear_session()
+    highest = max(row["accuracy"] for row in results)
+    best = [row["model"] for row in results if row["accuracy"] == highest]
+    payload = {
+        "scope": config.scope(smoke), "archive_sha256": meta["archive_sha256"],
+        "stats": meta["stats"], "training": protocol, "evaluation_batch_size": batch_size,
+        "results": results, "highest_top1_models": best,
+    }
+    save_json(run_dir / "model_comparison.json", payload)
+    report = report_path or run_dir / "results.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(format_report(payload), encoding="utf-8")
+    print(json.dumps(results, indent=2))
+    print(f"Comparison report: {report}")
 
-    # Number of classes is read from the saved model architecture
-    model = keras.models.load_model(checkpoint_path)
-    model.summary()
 
-    test_ds = create_test_dataset(config.TEST_DIR)
-    test_ds = configure_for_performance(test_ds, batch_size=batch_size, shuffle=False)
-
-    results = model.evaluate(test_ds, return_dict=True)
-    print(f"Model {model_name} test results: {results}")
-
-    out_path = os.path.join(config.RESULTS_DIR, f"test_results_{model_name}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-
-    return results
-
-
-def compare_models(batch_size: int = config.BATCH_SIZE):
-    """Evaluate all three model checkpoints and print a comparison table."""
-    summary = []
-    for name in ["a", "b", "c"]:
-        res = evaluate_model(name, batch_size=batch_size)
-        if res:
-            summary.append(
-                {
-                    "model": name,
-                    "loss": res.get("loss"),
-                    "accuracy": res.get("accuracy"),
-                    "top5_accuracy": res.get("top5_accuracy"),
-                }
-            )
-
-    print("\n=== Model Comparison ===")
-    print(f"{'Model':<8} {'Loss':<12} {'Top-1 Acc':<12} {'Top-5 Acc':<12}")
-    for row in summary:
-        print(
-            f"{row['model']:<8} {row['loss']:<12.4f} "
-            f"{row['accuracy']:<12.4f} {row['top5_accuracy']:<12.4f}"
+def format_report(payload):
+    stats = payload["stats"]
+    training = payload["training"]
+    if payload["scope"] == "smoke":
+        title = "# Real-data CPU smoke test"
+        note = "Development subset only. These are not full-dataset assignment scores."
+    else:
+        title = "# Full-dataset test results"
+        note = "All three classifiers were evaluated on the same unaugmented holdout."
+    lines = [
+        title, "", note, "",
+        f"- Output classes: {stats['classes']:,}; test coverage: {stats['classes_with_test_samples']:,} classes",
+        f"- Original training images: {stats['train_originals']:,}; original test images: {stats['test_originals']:,}",
+        f"- Augmented training draws per epoch: {stats['augmented_training_images_per_epoch']:,}",
+        f"- Training: {training['epochs']} epochs, batch {training['batch_size']}, Adam "
+        f"learning rate {training['learning_rate']:g}, {training['precision']}, seed {training['seed']}",
+        f"- Dataset ZIP SHA-256: `{payload['archive_sha256']}`",
+        "",
+        "| Model | Parameters | Test loss | Top-1 | Top-5 |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in payload["results"]:
+        lines.append(
+            f"| {row['model'].upper()} | {row['parameters']:,} | {row['loss']:.4f} | "
+            f"{row['accuracy']:.2%} | {row['top5_accuracy']:.2%} |"
         )
-
-    summary_path = os.path.join(config.RESULTS_DIR, "model_comparison.json")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    best = ", ".join(name.upper() for name in payload["highest_top1_models"])
+    return "\n".join(lines + [
+        "", f"Highest observed test top-1: **{best}**.",
+        "Top-1 counts exact first-choice predictions; top-5 counts true labels among the five highest scores.",
+        "These are image-weighted scores, and classes without held-out samples are not measured.", "",
+    ])
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate trained models")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--model",
-        type=str,
-        default="a",
-        choices=["a", "b", "c"],
-        help="Evaluate a single model",
-    )
-    group.add_argument(
-        "--compare",
-        action="store_true",
-        help="Evaluate and compare all three models",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=config.BATCH_SIZE,
-        help="Batch size for evaluation",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
-
-    if args.compare:
-        compare_models(batch_size=args.batch_size)
-    else:
-        evaluate_model(args.model, batch_size=args.batch_size)
+    compare(args.smoke, args.batch_size, args.report)

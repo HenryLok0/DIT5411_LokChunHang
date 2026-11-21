@@ -16,6 +16,7 @@ env/
 data/
 models/*.keras
 results/
+runs/
 *.zip
 *.tar.gz
 

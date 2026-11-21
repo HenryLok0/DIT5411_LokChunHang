@@ -1,151 +1,147 @@
-"""
-Prepare the dataset for training and testing.
-
-Steps:
-1. Locate the raw image directory (full 300x300 dataset or 50x50 common words).
-2. For each character folder, copy the first N images to train/ and the rest to test/.
-3. Rename folders and files to ASCII-safe numeric IDs. This avoids encoding
-   issues with TensorFlow / OpenCV on Windows when paths contain Chinese characters.
-4. Save a label mapping (metadata.json) to translate numeric IDs back to characters.
-
-Expected raw folder structure after unzip:
-    data/raw/cleaned_data/<character>/<character>_<id>.png
-
-If you use the 50x50 common-words dataset the folder is named
-`cleaned_data(50_50)` and the script will use that automatically.
-"""
+"""Audit the official ZIP and prepare compact, disjoint train and test arrays."""
 
 import argparse
+from collections import Counter, defaultdict
+import hashlib
 import json
-import os
+from pathlib import Path
+import re
 import shutil
+import tempfile
+from zipfile import ZipFile
+
+import cv2
+import numpy as np
 
 import config
-from utils import discover_classes
 
 
-def find_raw_data_dir():
-    """Pick the first existing raw dataset folder."""
-    for candidate in [config.RAW_DATA_DIR, config.RAW_DATA_DIR_50x50]:
-        if os.path.isdir(candidate):
-            print(f"Using raw dataset: {candidate}")
-            return candidate
-    raise FileNotFoundError(
-        f"No raw dataset folder found at {config.RAW_DATA_DIR} or "
-        f"{config.RAW_DATA_DIR_50x50}. Please download and unzip the dataset first."
-    )
-
-
-def _copy_with_numeric_names(
-    src_dir: str, dest_dir: str, image_names: list, start_index: int = 0
-) -> int:
-    """Copy selected images into dest_dir with numeric filenames."""
-    os.makedirs(dest_dir, exist_ok=True)
-    count = 0
-    for idx, img_name in enumerate(image_names, start=start_index):
-        src_path = os.path.join(src_dir, img_name)
-        ext = os.path.splitext(img_name)[1].lower()
-        dest_path = os.path.join(dest_dir, f"{idx:04d}{ext}")
-        shutil.copy2(src_path, dest_path)
-        count += 1
-    return count
-
-
-def split_character_folder(
-    src_dir: str,
-    train_dir: str,
-    test_dir: str,
-    n_train: int,
-):
-    """
-    Copy the first n_train images from src_dir to train_dir and the rest to test_dir.
-    Renames files to numeric IDs. Returns (train_count, test_count).
-    """
-    images = [
-        f
-        for f in os.listdir(src_dir)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-    # Sort to make the split deterministic across runs
-    images.sort()
-
-    train_images = images[:n_train]
-    test_images = images[n_train:]
-
-    tr = _copy_with_numeric_names(src_dir, train_dir, train_images, start_index=0)
-    te = _copy_with_numeric_names(src_dir, test_dir, test_images, start_index=n_train)
-
-    return tr, te
-
-
-def prepare(raw_dir: str, n_train: int = config.TRAIN_SAMPLES_PER_CLASS):
-    """Split every character folder into train/test folders with numeric IDs."""
-    classes = discover_classes(raw_dir)
-    print(f"Found {len(classes)} character classes in {raw_dir}")
-
-    # Limit to the requested number of classes if there are more
-    if len(classes) > config.NUM_CLASSES:
-        classes = classes[: config.NUM_CLASSES]
-
-    # Numeric label map: index -> Chinese character
-    label_map = {idx: char for idx, char in enumerate(classes)}
-
-    total_train = 0
-    total_test = 0
-    skipped = []
-
-    for idx, char in enumerate(classes):
-        src = os.path.join(raw_dir, char)
-        train_dest = os.path.join(config.TRAIN_DIR, f"{idx:05d}")
-        test_dest = os.path.join(config.TEST_DIR, f"{idx:05d}")
-
-        n_img = len(
-            [f for f in os.listdir(src) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-        )
-        if n_img < n_train:
-            skipped.append((char, n_img))
+def index_archive(archive):
+    """Use the numeric folder as the label and the filename for the glyph/sample ID."""
+    folders = defaultdict(dict)
+    characters = {}
+    for info in archive.infolist():
+        if info.is_dir():
             continue
+        match = re.fullmatch(r"cleaned_data/([0-9]+)/(.+)_([0-9]+)\.png", info.filename)
+        if not match:
+            raise ValueError(f"Unexpected member: {info.filename!r}")
+        folder, char, sample = match.groups()
+        label, sample = int(folder), int(sample)
+        if characters.setdefault(label, char) != char or sample in folders[label]:
+            raise ValueError(f"Inconsistent glyph or duplicate sample in {info.filename!r}")
+        folders[label][sample] = info
+    if sorted(folders) != list(range(1, config.NUM_CLASSES + 1)):
+        raise ValueError(f"Expected source labels 1..{config.NUM_CLASSES}; found {len(folders)} folders.")
+    return [
+        (label, characters[label], [info for _, info in sorted(folders[label].items())])
+        for label in sorted(folders)
+    ]
 
-        tr, te = split_character_folder(src, train_dest, test_dest, n_train)
-        total_train += tr
-        total_test += te
 
-    # Save metadata
-    metadata = {
-        "num_classes": len(classes),
-        "train_samples": total_train,
-        "test_samples": total_test,
-        "train_per_class": n_train,
-        "label_map": label_map,
-        "skipped_classes": skipped,
+def split_counts(index):
+    counts = [len(images) for _, _, images in index]
+    return {
+        "classes": len(counts),
+        "original_images": sum(counts),
+        "minimum_originals_per_class": min(counts),
+        "maximum_originals_per_class": max(counts),
+        "classes_below_40": sum(n < config.TRAIN_PER_CLASS for n in counts),
+        "classes_with_test_samples": sum(n > config.TRAIN_PER_CLASS for n in counts),
+        "train_originals": sum(min(n, config.TRAIN_PER_CLASS) for n in counts),
+        "test_originals": sum(max(0, n - config.TRAIN_PER_CLASS) for n in counts),
+        "augmented_training_images_per_epoch": (
+            len(counts) * config.AUGMENT_FACTOR * config.TRAIN_PER_CLASS
+        ),
+        "originals_per_class_histogram": dict(sorted(Counter(counts).items())),
     }
-    meta_path = os.path.join(config.RESULTS_DIR, "metadata.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    print(f"Prepared {len(classes)} classes")
-    print(f"Train samples: {total_train}, Test samples: {total_test}")
-    if skipped:
-        print(f"Skipped {len(skipped)} classes with fewer than {n_train} samples")
+
+def pick_smoke_classes(index):
+    """Sample across the label space, including one short class to exercise the fallback."""
+    eligible = [row for row in index if len(row[2]) > config.TRAIN_PER_CLASS]
+    short = [row for row in index if len(row[2]) < config.TRAIN_PER_CLASS]
+    rng = np.random.default_rng(config.SEED)
+    choice = rng.choice(len(eligible), config.SMOKE_CLASSES - 1, replace=False)
+    return sorted([eligible[i] for i in choice] + [min(short, key=lambda row: len(row[2]))])
+
+
+def preprocess(png):
+    image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise ValueError("Failed to decode an image in the dataset.")
+    # Normalize image polarity using the border, so the affine fill is always white.
+    if np.median(np.concatenate((image[0], image[-1], image[:, 0], image[:, -1]))) < 128:
+        image = 255 - image
+    return cv2.resize(image, (config.IMG_SIZE, config.IMG_SIZE), interpolation=cv2.INTER_AREA)
+
+
+def prepare(archive_path, smoke=False, audit_only=False):
+    with archive_path.open("rb") as stream:
+        source_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+    # Python's Big5 codec rejects some names in this archive; CP950 accepts them.
+    with ZipFile(archive_path, metadata_encoding="cp950") as archive:
+        full_index = index_archive(archive)
+        if audit_only:
+            return {"archive_sha256": source_sha256, **split_counts(full_index)}
+        index = pick_smoke_classes(full_index) if smoke else full_index
+        stats = split_counts(index)
+        dest = config.CACHE_ROOT / config.scope(smoke)
+        if dest.exists():
+            raise FileExistsError(f"{dest} already exists; use that cache or select a new cache root.")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        temp = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f"{dest.name}-partial-"))
+        try:
+            train = np.lib.format.open_memmap(
+                temp / "train.npy", mode="w+", dtype=np.uint8,
+                shape=(stats["train_originals"], config.IMG_SIZE, config.IMG_SIZE, 1),
+            )
+            test = np.lib.format.open_memmap(
+                temp / "test.npy", mode="w+", dtype=np.uint8,
+                shape=(stats["test_originals"], config.IMG_SIZE, config.IMG_SIZE, 1),
+            )
+            classes = []
+            tr = te = 0
+            for i, (label, char, items) in enumerate(index):
+                n_train = min(len(items), config.TRAIN_PER_CLASS)
+                classes.append({
+                    "source_label": label, "character": char,
+                    "train_count": n_train, "test_count": len(items) - n_train,
+                })
+                for j, item in enumerate(items):
+                    try:
+                        image = preprocess(archive.read(item))
+                    except ValueError as exc:
+                        raise ValueError(f"Cannot preprocess {item.filename!r}") from exc
+                    if j < n_train:
+                        train[tr, :, :, 0] = image
+                        tr += 1
+                    else:
+                        test[te, :, :, 0] = image
+                        te += 1
+                if (i + 1) % 1000 == 0:
+                    print(f"Decoded {i + 1}/{len(index)} classes", flush=True)
+            train.flush()
+            test.flush()
+            del train, test
+            meta = {
+                "format": 1, "scope": config.scope(smoke), "archive_sha256": source_sha256,
+                "image_size": config.IMG_SIZE, "stats": stats, "labels": classes,
+            }
+            (temp / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                                                encoding="utf-8")
+            temp.rename(dest)
+        finally:
+            if temp.exists():
+                shutil.rmtree(temp)
+    return {"prepared": str(dest), **stats}
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Prepare train/test split for Chinese handwriting dataset"
-    )
-    parser.add_argument(
-        "--raw-dir",
-        type=str,
-        default=None,
-        help="Override the raw dataset directory from config.py",
-    )
-    parser.add_argument(
-        "--n-train",
-        type=int,
-        default=config.TRAIN_SAMPLES_PER_CLASS,
-        help="Number of training samples per class",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive", required=True, type=Path, help="Combined full dataset ZIP")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--smoke", action="store_true", help="Prepare a 32-class development run")
+    group.add_argument("--audit-only", action="store_true", help="Read ZIP index without decoding")
     args = parser.parse_args()
-
-    raw_dir = args.raw_dir if args.raw_dir else find_raw_data_dir()
-    prepare(raw_dir, n_train=args.n_train)
+    print(json.dumps(prepare(args.archive, args.smoke, args.audit_only), indent=2))
