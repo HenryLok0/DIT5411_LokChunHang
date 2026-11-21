@@ -24,6 +24,12 @@ from tensorflow import keras
 
 import config
 from models import compile_model, get_model
+
+# Enable mixed-precision training for faster GPU computation
+if config.MIXED_PRECISION:
+    from tensorflow.keras import mixed_precision
+    mixed_precision.set_global_policy("mixed_float16")
+    print("Mixed precision enabled (float16).")
 from utils import (
     configure_for_performance,
     decode_image,

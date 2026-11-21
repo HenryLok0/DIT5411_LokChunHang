@@ -65,6 +65,14 @@ LEARNING_RATE = 3e-4
 DROPOUT_RATE = 0.3
 
 # ---------------------------------------------------------------------------
+# Speedups
+# ---------------------------------------------------------------------------
+# Enable mixed precision (float16) training on NVIDIA GPUs. This can be 1.5-2x
+# faster on RTX cards with minimal accuracy impact. Set to False if you see
+# NaN losses or your GPU does not support float16.
+MIXED_PRECISION = True
+
+# ---------------------------------------------------------------------------
 # Random seed for reproducibility
 # ---------------------------------------------------------------------------
 SEED = 42

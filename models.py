@@ -66,7 +66,10 @@ def build_model_a(
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.Dropout(dropout_rate)(x)
-    outputs = layers.Dense(config.NUM_CLASSES, activation="softmax", name="predictions")(x)
+    # Final layer uses float32 for numerical stability with mixed precision
+    outputs = layers.Dense(
+        config.NUM_CLASSES, activation="softmax", dtype="float32", name="predictions"
+    )(x)
 
     model = keras.Model(inputs, outputs, name="model_a")
     return model
@@ -91,7 +94,10 @@ def build_model_b(
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.Dropout(dropout_rate)(x)
-    outputs = layers.Dense(config.NUM_CLASSES, activation="softmax", name="predictions")(x)
+    # Final layer uses float32 for numerical stability with mixed precision
+    outputs = layers.Dense(
+        config.NUM_CLASSES, activation="softmax", dtype="float32", name="predictions"
+    )(x)
 
     model = keras.Model(inputs, outputs, name="model_b")
     return model
@@ -115,7 +121,10 @@ def build_model_c(
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.Dropout(dropout_rate)(x)
-    outputs = layers.Dense(config.NUM_CLASSES, activation="softmax", name="predictions")(x)
+    # Final layer uses float32 for numerical stability with mixed precision
+    outputs = layers.Dense(
+        config.NUM_CLASSES, activation="softmax", dtype="float32", name="predictions"
+    )(x)
 
     model = keras.Model(inputs, outputs, name="model_c")
     return model
